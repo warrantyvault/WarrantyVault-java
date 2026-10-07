@@ -8,7 +8,8 @@ import {
   showMessage,
   formatDate,
   errorBox,
-  confirmDialog
+  confirmDialog,
+  statusBadge
 } from '../ui.js';
 
 export async function renderSpace(runtime, spaceId) {
@@ -17,7 +18,23 @@ export async function renderSpace(runtime, spaceId) {
   main.append(element('p', {role: 'status'}, 'Loading Space…'));
   runtime.renderShell(main, true);
   try {
-    const space = await apiJson(`/api/spaces/${encodeURIComponent(spaceId)}`);
+    const initialParams = new URLSearchParams(window.location.search);
+    const initialProductParams = new URLSearchParams({
+      size: '50', page: '0', sort: initialParams.get('sort') || 'expiry'
+    });
+    if (initialParams.get('q')?.trim())
+      initialProductParams.set('q', initialParams.get('q').trim());
+    if (initialParams.get('status'))
+      initialProductParams.set('status', initialParams.get('status'));
+    if (initialParams.get('type'))
+      initialProductParams.set('type', initialParams.get('type'));
+    const [space, facets, initialProducts] = await Promise.all([
+      apiJson(`/api/spaces/${encodeURIComponent(spaceId)}`),
+      apiJson('/api/products/facets'),
+      apiJson(
+          `/api/spaces/${encodeURIComponent(spaceId)}/products?${
+              initialProductParams}`)
+    ]);
     runtime.setPageTitle(space.name);
     main.removeAttribute('aria-busy');
     main.replaceChildren();
@@ -53,13 +70,14 @@ export async function renderSpace(runtime, spaceId) {
         filterForm, 'Search products', 'q', 'search',
         {placeholder: 'Name, brand, or model', required: false});
     search.setAttribute('aria-controls', 'product-results');
+    search.value = initialParams.get('q') || '';
     const status = addSelect(
         filterForm, 'Warranty status', 'status',
         [
           ['', 'All statuses'], ['ACTIVE', 'Active'],
           ['EXPIRING_SOON', 'Expiring soon'], ['EXPIRED', 'Expired']
         ],
-        '',
+        initialParams.get('status') || '',
         {required: false});
     const sort = addSelect(
         filterForm, 'Sort', 'sort',
@@ -67,7 +85,12 @@ export async function renderSpace(runtime, spaceId) {
           ['expiry', 'Soonest expiry'], ['purchased', 'Recently purchased'],
           ['name', 'Product name']
         ],
-        'expiry');
+        initialParams.get('sort') || 'expiry');
+    const type = addSelect(
+          filterForm, 'Product type', 'type',
+          [['', 'All types'], ...(facets.types || []).map((value) => [value, value])],
+          new URLSearchParams(window.location.search).get('type') || '',
+          {required: false});
     const productRegion = element('section', {id: 'product-results'});
     const pageControls = element(
         'nav', {className: 'page-controls', 'aria-label': 'Product pages'});
@@ -75,7 +98,7 @@ export async function renderSpace(runtime, spaceId) {
 
     let page = 0;
     let currentRequest = 0;
-    const loadProducts = async (reset = true) => {
+    const loadProducts = async (reset = true, initialResults = null) => {
       if (reset) page = 0;
       const request = ++currentRequest;
       productRegion.setAttribute('aria-busy', 'true');
@@ -85,8 +108,11 @@ export async function renderSpace(runtime, spaceId) {
           {size: '50', page: String(page), sort: sort.value});
       if (search.value.trim()) params.set('q', search.value.trim());
       if (status.value) params.set('status', status.value);
+      if (type.value) params.set('type', type.value);
+      const nextUrl = `${window.location.pathname}?${params.toString()}`;
+      history.replaceState({}, '', nextUrl);
       try {
-        const results = await apiJson(
+        const results = initialResults || await apiJson(
             `/api/spaces/${encodeURIComponent(spaceId)}/products?${params}`);
         if (request !== currentRequest) return;
         productRegion.removeAttribute('aria-busy');
@@ -104,8 +130,11 @@ export async function renderSpace(runtime, spaceId) {
         } else {
           const list = element('div', {className: 'line-list'});
           for (const product of results.items) {
-            const row =
-                element('article', {className: 'line-item product-row'});
+            const row = link(
+                '',
+                `/spaces/${encodeURIComponent(spaceId)}/products/${
+                    encodeURIComponent(product.id)}`,
+                'line-item product-row');
             const summary = element('span');
             summary.append(
                 element(
@@ -114,21 +143,9 @@ export async function renderSpace(runtime, spaceId) {
                     'small', {},
                     `${product.modelName || 'No model'} · expires ${
                         formatDate(product.expiresOn)}`));
-            row.append(
-                summary,
-                element(
-                    'span', {
-                      className: `status-label status-${
-                          String(product.status)
-                              .toLowerCase()
-                              .replaceAll('_', '-')}`
-                    },
-                    product.status.replaceAll('_', ' ')));
-            row.append(link(
-                'View',
-                `/spaces/${encodeURIComponent(spaceId)}/products/${
-                    encodeURIComponent(product.id)}`,
-                'text-button'));
+            row.append(summary, statusBadge(
+                product.status.replaceAll('_', ' '),
+                String(product.status).toLowerCase().replaceAll('_', '-')));
             list.append(row);
           }
           productRegion.append(list);
@@ -173,11 +190,12 @@ export async function renderSpace(runtime, spaceId) {
     });
     status.addEventListener('change', () => loadProducts());
     sort.addEventListener('change', () => loadProducts());
+    type.addEventListener('change', () => loadProducts());
     filterForm.addEventListener('submit', (event) => {
       event.preventDefault();
       loadProducts();
     });
-    await loadProducts();
+    await loadProducts(true, initialProducts);
   } catch (error) {
     main.removeAttribute('aria-busy');
     main.replaceChildren(errorBox(error, () => renderSpace(runtime, spaceId)));
